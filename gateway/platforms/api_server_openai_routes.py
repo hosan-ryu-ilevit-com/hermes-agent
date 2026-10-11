@@ -7,6 +7,7 @@ module (top-level import = cycle), and lazy lookup keeps ``patch("...api_server.
 """
 
 import asyncio
+import os
 import json
 import logging
 import re
@@ -1161,6 +1162,10 @@ class OpenAICompatRoutesMixin:
                 _stream_q, tool_progress_callback=_on_tool_progress,
                 tool_start_callback=_on_tool_start, tool_complete_callback=_on_tool_complete,
                 interim_assistant_callback=_on_commentary, **run_kwargs)
+            if os.environ.get("HERMES_LAB_STEER") and conversation:  # 랩 끼어들기: 대화 이름으로 이 실행을 찾게 둔다
+                from gateway.platforms.api_server import _LAB_AGENTS
+                _LAB_AGENTS[str(conversation)] = agent_ref
+                agent_task.add_done_callback(lambda _f, _c=str(conversation), _r=agent_ref: _LAB_AGENTS.pop(_c, None) if _LAB_AGENTS.get(_c) is _r else None)
             return await self._write_sse_responses(
                 request=request, response_id=f"resp_{uuid.uuid4().hex[:28]}",
                 model=body.get("model", self._model_name), created_at=int(time.time()),

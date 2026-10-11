@@ -230,6 +230,33 @@ def listen_address(extra: Dict[str, Any]) -> tuple[str, int]:
         raw_port = os.getenv("API_SERVER_PORT", str(DEFAULT_PORT))
     return host, _coerce_port(raw_port, DEFAULT_PORT)
 MAX_STORED_RESPONSES = 100
+# 랩 clarify: 질문 문장 묶음 → 대기 항목. 화면이 같은 질문 문장과 답을 /v1/lab/clarify 로 보내면 풀린다.
+_LAB_CLARIFY: Dict[str, Dict[str, Any]] = {}
+_LAB_CLARIFY_WAIT = float(os.environ.get("HERMES_LAB_CLARIFY_WAIT", "180"))
+# 랩 끼어들기: 대화 이름 → 지금 그 대화를 처리 중인 에이전트 참조(agent_ref). /v1/lab/steer 가 redirect·steer 를 넣는다.
+_LAB_AGENTS: Dict[str, list] = {}
+
+
+def _lab_clarify_key(texts) -> str:
+    import hashlib
+    return hashlib.sha1("\u241e".join(t.strip() for t in texts).encode()).hexdigest()
+
+
+def _lab_clarify_wait(questions) -> dict:
+    import threading
+    key = _lab_clarify_key(q["question"] for q in questions)
+    entry = _LAB_CLARIFY[key] = {"event": threading.Event(), "answers": None}
+    try:
+        if entry["event"].wait(_LAB_CLARIFY_WAIT) and entry["answers"] is not None:
+            ans = entry["answers"]
+            return {"answers": {q["qid"]: ans[i] for i, q in enumerate(questions) if i < len(ans) and ans[i] not in (None, "")},
+                    "outcome": "submitted"}
+        return {"answers": {}, "outcome": "timed_out",
+                "notice": "유저가 답하지 않았습니다. 지금까지 찾은 것으로 답을 마무리하고, 무엇을 가정했는지 밝히세요."}
+    finally:
+        _LAB_CLARIFY.pop(key, None)
+
+
 MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversations with tool calls
 # Send a comment before remote API clients' common 20-second idle deadline.
 # This constant is shared by OpenAI chat/Responses and native session SSE.
@@ -1746,6 +1773,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         """(method, path, handler) rows registered by ``connect()`` (a method so multiplex tests
         can assert the /p/<profile>/ mirrors without a listener)."""
         routes: List[tuple] = [
+            *([("POST", "/v1/lab/clarify", self._handle_lab_clarify)] if os.environ.get("HERMES_LAB_CLARIFY") else []),
+            *([("POST", "/v1/lab/steer", self._handle_lab_steer)] if os.environ.get("HERMES_LAB_STEER") else []),
             ("GET", "/health", self._handle_health),
             ("GET", "/health/detailed", self._handle_health_detailed),
             ("GET", "/v1/health", self._handle_health),
@@ -2436,7 +2465,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "memory_manager": self._memory_sessions.checkout(session_id)}
         if request_service_tier is not _REQUEST_OPTION_MISSING:
             agent_kwargs["service_tier"] = request_service_tier
+        # Same OpenRouter provider routing as the messaging gateway (run_turn_runner): only/ignore/order/sort.
+        pr = GatewayRunner._load_provider_routing()
+        agent_kwargs.update(
+            providers_allowed=pr.get("only"), providers_ignored=pr.get("ignore"), providers_order=pr.get("order"),
+            provider_sort=pr.get("sort"), provider_require_parameters=pr.get("require_parameters", False),
+            provider_data_collection=pr.get("data_collection"))
         agent = AIAgent(**agent_kwargs)
+        if os.environ.get("HERMES_LAB_CLARIFY"):  # 랩: 질문 카드는 도구 호출 이벤트로 화면에 뜨고, 답(/v1/lab/clarify)을 기다린다
+            agent.clarify_callback = _lab_clarify_wait
         route_source = (
             "session_model_lock" if confirmed_runtime_lock
             else "session_model_override" if session_override
@@ -2448,6 +2485,35 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return agent
 
     # -- HTTP handlers ----------------------------------------------------------------
+
+    async def _handle_lab_clarify(self, request: "web.Request") -> "web.Response":
+        """랩: 화면의 질문 카드 답 {questions: [질문 문장…], answers: [답…]} → 기다리던 clarify 를 푼다."""
+        auth_err = self._check_auth(request) if hasattr(self, "_check_auth") else None
+        if auth_err is not None:
+            return auth_err
+        body = await request.json()
+        entry = _LAB_CLARIFY.get(_lab_clarify_key(body.get("questions") or []))
+        if not entry:
+            return web.json_response({"ok": False, "error": "기다리는 질문이 없습니다(이미 끝났거나 시간 초과)"}, status=404)
+        entry["answers"] = list(body.get("answers") or [])
+        entry["event"].set()
+        return web.json_response({"ok": True})
+
+    async def _handle_lab_steer(self, request: "web.Request") -> "web.Response":
+        """랩 끼어들기 {conversation, text, mode: redirect|steer} — redirect 는 모델 요청 중이면 그 요청만 취소하고
+        정정을 유저 메시지로 넣어 이어 간다(도구 실행 중이면 steer 로 바뀜). steer 는 지금 도구 묶음 뒤에 넣는다."""
+        auth_err = self._check_auth(request) if hasattr(self, "_check_auth") else None
+        if auth_err is not None:
+            return auth_err
+        body = await request.json()
+        ref = _LAB_AGENTS.get(str(body.get("conversation") or ""))
+        agent = ref[0] if ref else None
+        text = str(body.get("text") or "").strip()
+        if agent is None or not text:
+            return web.json_response({"ok": False, "error": "진행 중인 실행이 없습니다"}, status=409)
+        fn = getattr(agent, "steer" if body.get("mode") == "steer" else "redirect", None)
+        accepted = bool(fn(text)) if fn else False
+        return web.json_response({"ok": accepted}, status=200 if accepted else 409)
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""

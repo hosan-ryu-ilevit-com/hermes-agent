@@ -1,5 +1,6 @@
 """Toolset helpers: get/resolve/validate named tool groups (static TOOLSETS + registry-registered)."""
 
+import os
 from pathlib import Path
 from typing import Dict, List, Any, Set, Optional, Tuple
 
@@ -204,7 +205,9 @@ TOOLSETS = {
     "hermes-api-server": _ts(
         "OpenAI-compatible API server — full agent tools accessible via HTTP (no "
         "interactive UI tools like clarify or send_message)",
-        _core_without("text_to_speech", "clarify", "computer_use", kanban=False),
+        # 랩(HERMES_LAB_CLARIFY=1): clarify 를 켠다 — 서버가 질문 카드를 띄우고 기다리지 않는 콜백을 단다(api_server._create_agent)
+        _core_without("text_to_speech", "computer_use", kanban=False) if os.environ.get("HERMES_LAB_CLARIFY")
+        else _core_without("text_to_speech", "clarify", "computer_use", kanban=False),
     ),
     "hermes-cli": _bundle("Full interactive CLI toolset - all default tools plus cronjob management"),
 
