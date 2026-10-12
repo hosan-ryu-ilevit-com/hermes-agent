@@ -164,7 +164,7 @@ def _hook_call_identity(kwargs: Dict[str, Any]) -> Optional[str]:
     payload; nothing new is plumbed. Deliberately not ``api_request_id`` — one API request
     carries many tool calls, which would re-collapse the keys.
     """
-    for field in ("tool_call_id", "turn_id"):
+    for field in ("tool_call_id", "turn_id", "session_id"):  # pre_verify 등 turn_id 없는 훅도 세션끼리는 다른 호출(1011: 동시 세션 관문이 서로 건너뜀)
         value = kwargs.get(field)
         if isinstance(value, str) and value:
             return value

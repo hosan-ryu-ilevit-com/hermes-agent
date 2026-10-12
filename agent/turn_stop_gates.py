@@ -58,7 +58,9 @@ def _pre_verify_nudge(agent, final_response, attempt: int) -> Optional[str]:
         from hermes_cli.lifecycle import has_hook
         from hermes_cli.plugins import get_pre_verify_continue_message
 
-        if _edited and has_hook("pre_verify") and attempt < max_verify_nudges():
+        # HERMES_PRE_VERIFY_ALWAYS=1: 코드 편집이 없는 턴(쇼핑 랩 등)에도 pre_verify 훅을 돌린다
+        _always = os.environ.get("HERMES_PRE_VERIFY_ALWAYS", "").strip().lower() in ("1", "true", "yes", "on")
+        if (_edited or _always) and has_hook("pre_verify") and attempt < max_verify_nudges():
             # Posture is fixed for the session — resolve once + cache.
             coding = getattr(agent, "_resolved_is_coding", None)
             if coding is None:
