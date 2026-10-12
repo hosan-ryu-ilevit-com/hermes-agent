@@ -1063,7 +1063,7 @@ class OpenAICompatRoutesMixin:
             return _error_response("Cannot use both 'conversation' and 'previous_response_id'", 400)
         if conversation:
             # A conversation name resolves to its latest response_id (unknown = new conversation).
-            previous_response_id = self._current_response_store().get_conversation(conversation)
+            previous_response_id = await asyncio.to_thread(self._current_response_store().get_conversation, conversation)
 
         input_messages: List[Dict[str, Any]] = []
         if isinstance(raw_input, str):
@@ -1103,7 +1103,7 @@ class OpenAICompatRoutesMixin:
                 logger.debug("Both conversation_history and previous_response_id provided; using conversation_history")
         stored_session_id = None
         if not conversation_history and previous_response_id:
-            stored = self._current_response_store().get(previous_response_id)
+            stored = await asyncio.to_thread(self._current_response_store().get, previous_response_id)
             if stored is None:
                 return _error_response(f"Previous response not found: {previous_response_id}", 404)
             conversation_history = list(stored.get("conversation_history", []))

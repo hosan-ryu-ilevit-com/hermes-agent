@@ -848,6 +848,17 @@ class ResponseStore:
         return row[0] if row else 0
 
 
+def _make_response_store(**kwargs) -> "ResponseStore":
+    """랩 배포(AGENTIC3_SHARED=1)는 파드 공유 저장소를 쓴다 — 켜지 않았거나 실패하면 종전 SQLite."""
+    if os.environ.get("AGENTIC3_SHARED") == "1":
+        try:
+            from gateway.platforms.lab_shared_store import SharedResponseStore
+            return SharedResponseStore(**kwargs)
+        except Exception:
+            logger.warning("shared response store unavailable — local SQLite only", exc_info=True)
+    return ResponseStore(**kwargs)
+
+
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key, X-Hermes-Session-Id"}
@@ -1272,7 +1283,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
         from hermes_constants import get_hermes_home
-        self._response_store = ResponseStore()  # this home's; a /p/<profile>/ route gets its own
+        self._response_store = _make_response_store()  # this home's; a /p/<profile>/ route gets its own
         self._response_store_home = str(get_hermes_home())
         self._response_stores: Dict[str, ResponseStore] = {}
         self._response_store_lock = threading.Lock()
@@ -1911,7 +1922,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         with self._response_store_lock:
             store = self._response_stores.get(str(home))
             if store is None:
-                store = self._response_stores[str(home)] = ResponseStore(db_path=str(home / "response_store.db"))
+                store = self._response_stores[str(home)] = _make_response_store(db_path=str(home / "response_store.db"))
             return store
 
     # -- Session DB -------------------------------------------------------------------
